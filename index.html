@@ -192,6 +192,8 @@
 
     <!-- Main Container -->
     <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        <!-- 第一次以檔案模式啟動、瀏覽器裡還留有 Live Server 時期的資料：一行提示，可一鍵搬進本資料夾（app.js renderBrowserDataBanner） -->
+        <div id="browserDataBanner" class="hidden p-3 bg-sky-50 border border-sky-300 rounded-xl text-xs text-sky-900 flex flex-wrap items-center gap-2"></div>
 
         <!-- TAB 1: MASTER SCHEDULE & CLASH DETECTION -->
         <section id="masterTab" class="tab-content space-y-6">

@@ -2,7 +2,7 @@
 
 給學校職員與導師。頁面請用 http 開（`serve.cmd` 或 VS Code Live Server），不要用 file://。
 
-用 `serve.cmd` 開：資料存在**本資料夾**的 `local-state.json`，每個資料夾各自一份（演示、真實各開各的，互不干擾）。用 Live Server 開：資料存在瀏覽器，同一網址的資料夾共用。第一次用 serve.cmd 開時若瀏覽器留有舊資料，會問要不要搬進本資料夾。
+用 `serve.cmd` 開：資料存在**本資料夾**的 `local-state.json`，每個資料夾各自一份（演示、真實各開各的，互不干擾）。用 Live Server 開：資料存在瀏覽器，同一網址的資料夾共用。第一次用 serve.cmd 開（或刪掉 `local-state.json` 重來）不會問什麼：直接從 `data.js` 的名單開始、建好資料檔；上次填過的 Google Client ID、預設與各導師的日曆 ID、FPS ID 會自動填回（另存在同一資料夾的 `local-credentials.json`，同樣不要提交、不要分享）。瀏覽器裡若還留有 Live Server 時期的資料，頁頂會有一行提示，按「搬進本資料夾」才會搬。
 
 按重新整理（F5）會回到原處：同一個頁籤、各頁選的月份、總課表的清單／月曆、捲到的位置（連清單裡面捲到哪）都不變；篩選和搜尋會清空。關掉再開（或用 serve.cmd 開一個新分頁）則從「全校時間表」、本月開始。
 

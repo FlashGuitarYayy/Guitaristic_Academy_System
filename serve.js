@@ -10,8 +10,10 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const GACStorage = require('./lib/storage.js');   // extractCredentials／credentialsEmpty（帳號資料另存）
 
 const STATE_FILE = 'local-state.json';
+const CRED_FILE = 'local-credentials.json';   // 帳號資料（Google Client ID、日曆 ID、FPS）另存；刪掉狀態檔重來時填回
 const MAX_BODY = 64 * 1024 * 1024;
 const mime = {
     '.html': 'text/html; charset=utf-8',
@@ -42,10 +44,38 @@ function writeState(root, obj) {
     fs.renameSync(tmp, p);
 }
 
-// 在 data.js 之前放一段 <script>：本資料夾的狀態與資料夾名，頁面（lib/storage.js pickStorage）據此改用檔案存放
+// 帳號資料另存一檔（local-credentials.json）：每次寫回狀態時從狀態抽出 Google Client ID、日曆 ID、FPS 等
+// （lib/storage.js extractCredentials）；刪掉 local-state.json 重來時注進頁面（window.__GAC_FILE_CREDENTIALS）自動填回。
+function readCredentials(root) {
+    const p = path.join(root, CRED_FILE);
+    if (!fs.existsSync(p)) return null;
+    try {
+        const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return (c && typeof c === 'object' && !Array.isArray(c)) ? c : null;
+    } catch (e) {
+        console.error(CRED_FILE + ' 不是有效的 JSON，本次不填回（檔案未動）：' + e.message);
+        return null;
+    }
+}
+
+// 狀態裡還沒有設定（頁面從沒寫回）→ 不動；什麼都沒填過又還沒有檔 → 不建；內容一樣 → 不重寫。回傳有沒有寫
+function syncCredentials(root, state) {
+    const creds = GACStorage.extractCredentials(state);
+    if (!creds) return false;
+    const cur = readCredentials(root);
+    if (!cur && GACStorage.credentialsEmpty(creds)) return false;
+    if (cur && JSON.stringify(cur) === JSON.stringify(creds)) return false;
+    const p = path.join(root, CRED_FILE), tmp = p + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(creds, null, 2));
+    fs.renameSync(tmp, p);
+    return true;
+}
+
+// 在 data.js 之前放一段 <script>：本資料夾的狀態、上次的帳號資料與資料夾名，頁面（lib/storage.js pickStorage）據此改用檔案存放
 function injectState(html, root) {
-    const json = JSON.stringify(readState(root)).replace(/</g, '\\u003c');
-    const tag = '<script>window.__GAC_FILE_STATE=' + json + ';window.__GAC_FILE_STORE={file:' + JSON.stringify(STATE_FILE) + ',folder:' + JSON.stringify(path.basename(root)) + '};</script>\n    ';
+    const esc = v => JSON.stringify(v).replace(/</g, '\\u003c');   // 狀態裡的 </script> 不能截斷標籤
+    const tag = '<script>window.__GAC_FILE_STATE=' + esc(readState(root)) + ';window.__GAC_FILE_CREDENTIALS=' + esc(readCredentials(root))
+        + ';window.__GAC_FILE_STORE={file:' + JSON.stringify(STATE_FILE) + ',credentialsFile:' + JSON.stringify(CRED_FILE) + ',folder:' + JSON.stringify(path.basename(root)) + '};</script>\n    ';
     const marker = '<script src="data.js"></script>';
     return html.includes(marker) ? html.replace(marker, tag + marker) : html;
 }
@@ -70,6 +100,7 @@ function handleState(req, res, root) {
                 const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
                 if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
                 writeState(root, parsed);
+                try { syncCredentials(root, parsed); } catch (e) { console.error('寫 ' + CRED_FILE + ' 失敗（狀態已存）：' + e.message); }
                 res.writeHead(204);
                 res.end();
             } catch (e) { res.writeHead(400); res.end('Bad state: ' + e.message); }
@@ -82,6 +113,8 @@ function handleState(req, res, root) {
 
 function createServer(root) {
     root = path.resolve(root); // 正規化（呼叫方給 / 或相對路徑也行；下面用 startsWith 擋路徑穿越）
+    // 啟動時先從現有狀態抽一次帳號資料（舊版留下的 local-state.json 還沒有對應的帳號檔）
+    try { syncCredentials(root, readState(root)); } catch (e) { console.error('寫 ' + CRED_FILE + ' 失敗：' + e.message); }
     return http.createServer((req, res) => {
         try {
             const urlPath = decodeURIComponent(new URL(req.url, 'http://127.0.0.1').pathname);
@@ -100,7 +133,7 @@ function createServer(root) {
     });
 }
 
-module.exports = { createServer, readState, writeState, injectState, STATE_FILE };
+module.exports = { createServer, readState, writeState, injectState, readCredentials, syncCredentials, STATE_FILE, CRED_FILE };
 
 if (require.main === module) {
     const root = __dirname;
@@ -118,5 +151,6 @@ if (require.main === module) {
         console.log('伺服器已啟動：http://127.0.0.1:5500/  （按 Ctrl+C 停止）');
         console.log('服務目錄：' + root);
         console.log('資料檔：' + path.join(root, STATE_FILE) + '（每個資料夾各自一份；改動 0.3 秒內寫回）');
+        console.log('帳號資料：' + path.join(root, CRED_FILE) + '（Google Client ID、日曆 ID、FPS 另存；刪掉資料檔重來時自動填回）');
     });
 }

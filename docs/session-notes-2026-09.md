@@ -20,7 +20,7 @@
   - `fileSaver(win)`：`PUT /__state`，本文 < 60KB 加 `keepalive`。
 - `state.js` 頂部：`const gacStorage = GACStorage.pickStorage(window)`（全域，在 payroll-advanced.js 之前就緒）。`gacStore = GACStorage.createStore(gacStorage)`。
 - 走 `gacStorage` 的 key：學生／小組／課表／發送紀錄／設定／撤銷快照／導師／費率覆寫／`gac_adjustments`／`gac_payroll_archives`／`gac_tutor_share_pct`。**仍在 localStorage**（UI 偏好）：`gac_batch_open`、`gac_settings_open`、`gac_dark_mode`。
-- 啟動流程（`window.onload`）：檔案模式且狀態為空 → `offerLocalStorageMigration()`：localStorage 有 `gac_students_v2` 或 `gac_lessons_v2` 就問一次，確定則複製所有 `gac_` 資料 key 進檔案存放、`flush()` 後 `location.reload()`。`installFileStoreHooks()`：`pagehide`／`visibilitychange=hidden` 時 `flush()`；寫回失敗 alert 一次。
+- 啟動流程（`window.onload`）：檔案模式且狀態為空（第一次／刪了重來）→ 不問，`startFreshFileState()`：`GACStorage.applyCredentials` 把 serve.js 注入的 `window.__GAC_FILE_CREDENTIALS`（`local-credentials.json`：Client ID、日曆 ID、FPS，serve.js 每次寫回狀態時 `syncCredentials` 抽出另存）填進設定與導師名單並立刻落盤；localStorage 有 `gac_students_v2`／`gac_lessons_v2` 只在頁頂顯示一行提示（`renderBrowserDataBanner`），按「搬進本資料夾」才 `migrateBrowserData()`（複製 `gac_` 資料 key、`flush()` 後 `location.reload()`）。（10/04 改：原本是啟動時 confirm 問要不要搬。）`installFileStoreHooks()`：`pagehide`／`visibilitychange=hidden` 時 `flush()`；寫回失敗 alert 一次。
 - 用 VS Code Live Server 開：沒有注入 → 退回 localStorage，行為與從前相同。
 - 冒煙的檔案模式：`GAC_SMOKE_FILE_MODE=1` 把 `fakeStorage` 的資料 key 轉到檔案存放的 Map，最後驗證全部落地且原 Map 只剩偏好 key。
 

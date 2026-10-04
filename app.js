@@ -1,8 +1,9 @@
 ﻿window.onload = function() {
             // v2：所有資料經 lib/storage.js 讀寫（新 key；舊 key 兼容讀取自動遷移；損壞 JSON 不白屏）
             gacStore = GACStorage.createStore(gacStorage);
-            // 檔案模式第一次啟動（本資料夾還沒有 local-state.json）：瀏覽器 localStorage 若留有上一次的資料，問要不要搬進本資料夾；搬了就重開頁面
-            if (gacStorage.isFileBacked && gacStorage.length === 0 && offerLocalStorageMigration()) { gacStorage.flush().then(() => window.location.reload()); return; }
+            // 檔案模式第一次啟動（本資料夾還沒有 local-state.json，或刪了重來）：不問，直接從 data.js 的名單開始並建檔；
+            // 上次填過的帳號資料由 serve.js 另存的 local-credentials.json 填回（startFreshFileState）
+            const freshFileStart = gacStorage.isFileBacked && gacStorage.length === 0;
             if (gacStorage.isFileBacked) installFileStoreHooks();
             // v3：導師名單與費率覆寫先載入（學生／課堂查價依賴）
             tutorsList = gacStore.loadTutors(typeof defaultTutors !== 'undefined' ? defaultTutors : []);
@@ -18,6 +19,7 @@
             sendLog = gacStore.loadSendlog();
             appSettings = gacStore.loadSettings();
             actionHistory = gacStore.loadHistory();
+            if (freshFileStart) startFreshFileState();
             if (gacStore.errors.length) {
                 alert('⚠️ 部分本機資料載入失敗（已回退預設值）：\n' + gacStore.errors.join('\n'));
             }
@@ -43,15 +45,52 @@
         };
 
         // ===== 資料存放（檔案模式，見 lib/storage.js pickStorage）=====
-        // 瀏覽器 localStorage 裡的資料搬進本資料夾（只搬 gac_ 資料 key，不搬 UI 開合等偏好）；回傳是否搬了
-        function offerLocalStorageMigration() {
-            const PREF = ['gac_batch_open', 'gac_settings_open', 'gac_dark_mode'];
-            let keys = [];
-            try { keys = Object.keys(window.localStorage).filter(k => k.startsWith('gac_') && !PREF.includes(k)); } catch (e) { return false; }
-            if (!keys.includes(GACStorage.KEYS.students) && !keys.includes(GACStorage.KEYS.lessons)) return false;
-            if (!confirm('本資料夾還沒有資料檔（local-state.json）。\n瀏覽器裡留有上一次用這個網址時的資料（名單／課表／設定／快照）。\n要搬進本資料夾嗎？\n「確定」＝複製進來（瀏覽器那份不動）；「取消」＝從 data.js 的名單重新開始。')) return false;
-            keys.forEach(k => { try { gacStorage.setItem(k, window.localStorage.getItem(k)); } catch (e) { /* 忽略 */ } });
-            return true;
+        // 本資料夾第一次啟動（或刪了 local-state.json 重來）：填回 serve.js 另存的帳號資料（local-credentials.json）並立刻建檔；
+        // 瀏覽器裡若留有上一次（Live Server 模式）的資料，頁頂給一行可以搬進來的提示，不彈窗
+        function startFreshFileState() {
+            const filled = GACStorage.applyCredentials(appSettings, tutorsList, window.__GAC_FILE_CREDENTIALS);
+            gacStore.saveSettings(appSettings);
+            persistTutors();
+            if (filled.length) showToast('✅ 已填回上次的帳號資料：' + describeFilledCredentials(filled), 6000);
+            renderBrowserDataBanner();
+        }
+
+        function describeFilledCredentials(filled) {
+            const names = { gcalClientId: 'Google Client ID', gcalCalendarId: '預設日曆 ID', fpsId: 'FPS ID', infoUrl: '資訊網址' };
+            return filled.map(k => names[k] || (k.startsWith('tutorCalendars:') ? `${k.slice('tutorCalendars:'.length)} 位導師的日曆 ID` : k)).join('、');
+        }
+
+        // 瀏覽器 localStorage 裡的 gac_ 資料 key（不含 UI 開合等偏好）：Live Server 模式留下的資料
+        const BROWSER_PREF_KEYS = ['gac_batch_open', 'gac_settings_open', 'gac_dark_mode'];
+        function browserDataKeys() {
+            try { return Object.keys(window.localStorage).filter(k => k.startsWith('gac_') && !BROWSER_PREF_KEYS.includes(k)); } catch (e) { return []; }
+        }
+
+        // 頁頂提示：瀏覽器裡留有上一次的名單／課表 → 一鍵搬進本資料夾（蓋過剛從 data.js 開始的那份）；不要就關掉，下次啟動（已有資料檔）不再出現
+        function renderBrowserDataBanner() {
+            const el = document.getElementById('browserDataBanner');
+            if (!el) return;
+            const keys = browserDataKeys();
+            const show = gacStorage.isFileBacked && (keys.includes(GACStorage.KEYS.students) || keys.includes(GACStorage.KEYS.lessons));
+            el.classList.toggle('hidden', !show);
+            if (!show) { el.innerHTML = ''; return; }
+            let students = 0, months = 0;
+            try { students = (JSON.parse(window.localStorage.getItem(GACStorage.KEYS.students) || '[]') || []).length; } catch (e) { /* 壞資料：當 0 */ }
+            try { months = Object.keys(JSON.parse(window.localStorage.getItem(GACStorage.KEYS.lessons) || '{}') || {}).length; } catch (e) { /* 壞資料：當 0 */ }
+            el.innerHTML = `<span><i class="fa-solid fa-database"></i> 本資料夾剛建立資料檔（從 data.js 的名單開始）。瀏覽器裡還留有上一次用這個網址（Live Server）的資料：學生 <b>${students}</b> 人、課表 <b>${months}</b> 個月。要用那份就按「搬進本資料夾」（蓋過目前的名單、課表、設定；瀏覽器那份不動）。</span>
+                <button onclick="migrateBrowserData()" class="ml-auto px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-bold">搬進本資料夾</button>
+                <button onclick="dismissBrowserDataBanner()" class="px-3 py-1.5 bg-white border border-sky-300 text-sky-800 hover:bg-sky-100 rounded-lg font-semibold">不用了</button>`;
+        }
+
+        function migrateBrowserData() {
+            if (!confirm('把瀏覽器裡的資料（名單／課表／設定／快照）複製進本資料夾的 local-state.json，蓋過目前的？\n瀏覽器那份不動。完成後會重新載入頁面。')) return;
+            browserDataKeys().forEach(k => { try { gacStorage.setItem(k, window.localStorage.getItem(k)); } catch (e) { /* 忽略 */ } });
+            gacStorage.flush().then(() => window.location.reload());
+        }
+
+        function dismissBrowserDataBanner() {
+            const el = document.getElementById('browserDataBanner');
+            if (el) { el.classList.add('hidden'); el.innerHTML = ''; }
         }
 
         // 檔案模式：關頁／切頁前把未寫回的改動送出；寫回失敗提示一次（改動仍在記憶體，之後再改會重試）
@@ -74,7 +113,7 @@
             const cfg = window.__GAC_FILE_STORE || {};
             const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : '';
             el.innerHTML = gacStorage.isFileBacked
-                ? `<i class="fa-solid fa-folder-open mr-1"></i>資料存放：<b>本資料夾的 ${escapeHtml(cfg.file || 'local-state.json')}</b>（${escapeHtml(cfg.folder || '')}）——每個資料夾各自一份，開哪個資料夾就是哪個資料夾上次的狀態；改動 0.3 秒內寫回。換電腦或防手滑仍請用「全量備份」。`
+                ? `<i class="fa-solid fa-folder-open mr-1"></i>資料存放：<b>本資料夾的 ${escapeHtml(cfg.file || 'local-state.json')}</b>（${escapeHtml(cfg.folder || '')}）——每個資料夾各自一份，開哪個資料夾就是哪個資料夾上次的狀態；改動 0.3 秒內寫回。帳號資料（Google Client ID、預設與各導師的日曆 ID、FPS ID、資訊網址）另存 <b>${escapeHtml(cfg.credentialsFile || 'local-credentials.json')}</b>：刪掉 ${escapeHtml(cfg.file || 'local-state.json')} 重來時自動填回。換電腦或防手滑仍請用「全量備份」。`
                 : `<i class="fa-solid fa-globe mr-1"></i>資料存放：<b>瀏覽器 localStorage</b>——同一網址（${escapeHtml(origin)}）的所有資料夾共用同一份。用 serve.cmd 啟動即改存本資料夾的 local-state.json，各資料夾互不干擾。`;
         }
 

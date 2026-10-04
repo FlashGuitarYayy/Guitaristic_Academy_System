@@ -109,3 +109,85 @@ test('serve.js：/__state 讀寫本資料夾 local-state.json（先 .tmp 再改�
         fs.rmSync(root, { recursive: true, force: true });
     }
 });
+
+test('帳號資料：extractCredentials 從狀態抽出 Client ID／日曆／FPS／導師日曆（備忘＋名單，清空的不記）；applyCredentials 只填空著的、導師按名字；credentialsEmpty', () => {
+    assert.strictEqual(ST.extractCredentials({}), null, '還沒存過設定 → null');
+    assert.strictEqual(ST.extractCredentials({ gac_settings_v2: '{oops' }), null);
+    const state = {
+        gac_settings_v2: JSON.stringify({ gcalClientId: ' cid.apps.googleusercontent.com ', gcalCalendarId: 'main@group.calendar.google.com', fpsId: '12345678', infoUrl: '', tplLeave: 'x', tutorCalendarMemo: { 'Instructor A': 'memo-a@group.calendar.google.com', 'Instructor Z': 'z@group.calendar.google.com', 'Gone': '' } }),
+        gac_tutors_v3: JSON.stringify([{ name: 'Instructor A', tier: '普通導師', calendarId: 'a@group.calendar.google.com' }, { name: 'Instructor B', tier: '資深導師', calendarId: '' }, { name: 'Instructor Z', calendarId: '' }])
+    };
+    const c = ST.extractCredentials(state);
+    assert.deepStrictEqual(c, { gcalClientId: 'cid.apps.googleusercontent.com', gcalCalendarId: 'main@group.calendar.google.com', fpsId: '12345678', infoUrl: '', tutorCalendars: { 'Instructor A': 'a@group.calendar.google.com' } }, '名單蓋過備忘；名單上清空的（Z）與空值（Gone）不記；不帶模板等其他設定');
+    assert.ok(!ST.credentialsEmpty(c));
+    assert.ok(ST.credentialsEmpty({ gcalClientId: '', gcalCalendarId: 'primary', fpsId: '', infoUrl: '', tutorCalendars: {} }), 'primary 算沒填');
+    assert.ok(ST.credentialsEmpty(null));
+    // 填回：空狀態（預設設定、data.js 的導師）
+    const settings = Object.assign({}, ST.DEFAULT_SETTINGS);
+    const tutors = [{ name: 'Instructor A', tier: '普通導師', calendarId: '' }, { name: 'Instructor B', tier: '資深導師', calendarId: 'keep@group.calendar.google.com' }];
+    const filled = ST.applyCredentials(settings, tutors, Object.assign({}, c, { tutorCalendars: { 'Instructor A': 'a@group.calendar.google.com', 'Instructor B': 'other@group.calendar.google.com' } }));
+    assert.deepStrictEqual(filled, ['gcalClientId', 'gcalCalendarId', 'fpsId', 'tutorCalendars:1'], 'infoUrl 空的不算填；B 已有 ID 不動');
+    assert.strictEqual(settings.gcalClientId, 'cid.apps.googleusercontent.com');
+    assert.strictEqual(settings.gcalCalendarId, 'main@group.calendar.google.com');
+    assert.strictEqual(settings.tplLeave, ST.DEFAULT_SETTINGS.tplLeave, '只動帳號欄位');
+    assert.strictEqual(tutors[0].calendarId, 'a@group.calendar.google.com');
+    assert.strictEqual(tutors[1].calendarId, 'keep@group.calendar.google.com');
+    assert.deepStrictEqual(settings.tutorCalendarMemo, { 'Instructor A': 'a@group.calendar.google.com', 'Instructor B': 'other@group.calendar.google.com' }, '備忘整份記住（換名單時按名字回填）');
+    // 已填的不覆蓋；沒有記錄 → 不動
+    const s2 = Object.assign({}, ST.DEFAULT_SETTINGS, { gcalClientId: 'mine' });
+    assert.deepStrictEqual(ST.applyCredentials(s2, [], c), ['gcalCalendarId', 'fpsId']);
+    assert.strictEqual(s2.gcalClientId, 'mine');
+    assert.deepStrictEqual(ST.applyCredentials(s2, [], null), []);
+});
+
+test('serve.js：寫回狀態時把帳號資料另存 local-credentials.json（沒填過不建檔、內容一樣不重寫、清空會跟著清）；啟動時從現有狀態補建；index.html 注入 __GAC_FILE_CREDENTIALS', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gac-cred-'));
+    fs.writeFileSync(path.join(root, 'index.html'), '<html><head></head><body>\n    <script src="data.js"></script>\n</body></html>');
+    const credPath = path.join(root, serve.CRED_FILE);
+    const put = (base, state) => fetch(base + '/__state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) });
+    let server = serve.createServer(root);
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = 'http://127.0.0.1:' + server.address().port;
+    try {
+        let html = await (await fetch(base + '/')).text();
+        assert.ok(html.includes('window.__GAC_FILE_CREDENTIALS=null;'), '沒有檔 → 注入 null');
+        assert.ok(html.includes('credentialsFile:"local-credentials.json"'));
+        assert.strictEqual((await put(base, { gac_students_v2: '[]' })).status, 204);
+        assert.ok(!fs.existsSync(credPath), '狀態裡沒有設定 → 不建檔');
+        assert.strictEqual((await put(base, { gac_students_v2: '[]', gac_settings_v2: JSON.stringify({ gcalClientId: '', gcalCalendarId: 'primary' }) })).status, 204);
+        assert.ok(!fs.existsSync(credPath), '什麼都沒填過 → 不建檔');
+        const creds = { gcalClientId: 'cid.apps.googleusercontent.com', gcalCalendarId: '', fpsId: '', infoUrl: '', tutorCalendars: { 'Instructor A': 'a@group.calendar.google.com' } };
+        const filledState = tpl => ({ gac_settings_v2: JSON.stringify({ gcalClientId: 'cid.apps.googleusercontent.com', tplLeave: tpl }), gac_tutors_v3: JSON.stringify([{ name: 'Instructor A', calendarId: 'a@group.calendar.google.com' }]) });
+        assert.strictEqual((await put(base, filledState('x'))).status, 204);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(credPath, 'utf8')), creds, '填了 → 建檔，只有帳號欄位');
+        assert.ok(!fs.existsSync(credPath + '.tmp'));
+        const mtime = fs.statSync(credPath).mtimeMs;
+        await new Promise(r => setTimeout(r, 20));
+        assert.strictEqual((await put(base, filledState('y'))).status, 204);
+        assert.strictEqual(fs.statSync(credPath).mtimeMs, mtime, '帳號資料沒變（只改了模板）→ 不重寫');
+        html = await (await fetch(base + '/')).text();
+        assert.ok(html.includes('window.__GAC_FILE_CREDENTIALS=' + JSON.stringify(creds) + ';'), '有檔 → 注進頁面');
+        // 清空 Client ID → 檔案跟著清（記的是「目前填著的」）
+        await put(base, { gac_settings_v2: JSON.stringify({ gcalClientId: '' }), gac_tutors_v3: '[]' });
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(credPath, 'utf8')), { gcalClientId: '', gcalCalendarId: '', fpsId: '', infoUrl: '', tutorCalendars: {} });
+        // 刪掉狀態檔重來：頁面拿到空狀態＋上次的帳號資料；壞掉的帳號檔 → 注入 null、檔案不動
+        fs.unlinkSync(path.join(root, serve.STATE_FILE));
+        html = await (await fetch(base + '/')).text();
+        assert.ok(html.includes('window.__GAC_FILE_STATE={};window.__GAC_FILE_CREDENTIALS={"gcalClientId":""'));
+        fs.writeFileSync(credPath, 'garbage');
+        html = await (await fetch(base + '/')).text();
+        assert.ok(html.includes('window.__GAC_FILE_CREDENTIALS=null;'));
+        assert.strictEqual(fs.readFileSync(credPath, 'utf8'), 'garbage');
+    } finally { await new Promise(r => server.close(r)); }
+    // 啟動時補建：舊版留下的 local-state.json 有設定、還沒有帳號檔
+    fs.unlinkSync(credPath);
+    serve.writeState(root, { gac_settings_v2: JSON.stringify({ gcalClientId: 'old.apps.googleusercontent.com' }) });
+    server = serve.createServer(root);
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    try {
+        assert.strictEqual(JSON.parse(fs.readFileSync(credPath, 'utf8')).gcalClientId, 'old.apps.googleusercontent.com');
+    } finally {
+        await new Promise(r => server.close(r));
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+});

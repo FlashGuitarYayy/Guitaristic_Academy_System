@@ -78,6 +78,8 @@ const PREF_KEYS = ['gac_batch_open', 'gac_settings_open', 'gac_dark_mode'];
 const origPrefMap = fakeStorage._m;
 if (FILE_MODE) {
     sandbox.__GAC_FILE_STATE = {};
+    // serve.js 注入的上次帳號資料（local-credentials.json）：第一次啟動自動填回
+    sandbox.__GAC_FILE_CREDENTIALS = { gcalClientId: 'cid.apps.googleusercontent.com', gcalCalendarId: 'main@group.calendar.google.com', fpsId: '12345678', infoUrl: '', tutorCalendars: { 'Instructor A': 'a@group.calendar.google.com' } };
     sandbox.__GAC_FILE_STORE = { file: 'local-state.json', folder: 'sandbox', delay: 5, save: obj => { savedState = obj; return Promise.resolve(); } };
 }
 
@@ -118,6 +120,22 @@ console.log('[1] window.onload');
 run('window.onload()');
 check('學生載入 14 人（含 3 位只上小組者）＋ 1 個預設小組班', run('studentDatabase.length') === 14 && run('groupClasses.length') === 1);
 check('新 key 已寫入', fakeStorage.getItem('gac_students_v2') !== null);
+// 檔案模式第一次啟動：不再彈「要不要搬進本資料夾」；serve.js 注入的上次帳號資料自動填回（設定與導師日曆 ID）並立刻落盤
+check('第一次啟動不再問要不要搬瀏覽器資料（函數已移除；改成頁頂一行提示）', run('typeof offerLocalStorageMigration') === 'undefined' && run('typeof renderBrowserDataBanner') === 'function');
+if (FILE_MODE) {
+    check('檔案模式第一次啟動：填回 Client ID／預設日曆／FPS 與導師日曆 ID（已有的不動），提示列出填了什麼，設定與導師名單已落盤',
+        run('appSettings.gcalClientId') === 'cid.apps.googleusercontent.com'
+        && run('appSettings.gcalCalendarId') === 'main@group.calendar.google.com' && run('appSettings.fpsId') === '12345678'
+        && run('tutorsList.find(t => t.name === "Instructor A").calendarId') === 'a@group.calendar.google.com'
+        && run('tutorsList.find(t => t.name === "Instructor B").calendarId') === ''
+        && run('appSettings.tutorCalendarMemo["Instructor A"]') === 'a@group.calendar.google.com'
+        && run('lastToast').includes('已填回上次的帳號資料') && run('lastToast').includes('1 位導師的日曆 ID')
+        && fakeStorage.getItem('gac_settings_v2').includes('cid.apps.googleusercontent.com') && fakeStorage.getItem('gac_tutors_v3').includes('a@group.calendar.google.com'));
+    // 檢查完清掉填回的值：之後的流程（未填 Client ID 的前置檢查、導師日曆等）兩種模式一致
+    run('appSettings.gcalClientId = ""; appSettings.gcalCalendarId = "primary"; appSettings.fpsId = ""; delete appSettings.tutorCalendarMemo; gacStore.saveSettings(appSettings); loadSettingsForm(); tutorsList.forEach(t => { t.calendarId = ""; }); persistTutors(); renderTutorCalendarList()');   // 設定表單也要重填，否則之後 saveSettingsForm() 會把表單裡的值讀回來
+} else {
+    check('localStorage 模式：沒有注入的帳號資料，設定維持預設', run('appSettings.gcalClientId') === '' && run('tutorsList.every(t => !t.calendarId)'));
+}
 // 舊寫法的小組（data.js 的 S003/S004：「2人小組」寫在兩人自己的常規課上）→ 載入時問一次要不要轉成小組班；同一個分頁不再自動問
 check('舊寫法的 2 人小組 → 載入時彈出「小組形式改用小組班」：列出 S003/S004、本月（9 月）起生效', getEl('msgModalTitle').textContent === '👥 小組形式改用小組班'
     && getEl('msgModalBody').innerHTML.includes('Student 003（S003）、Student 004（S004）') && getEl('msgModalBody').innerHTML.includes('本月（2026-09）起')
