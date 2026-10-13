@@ -932,6 +932,9 @@ run('Object.assign(studentDatabase[0], { tutorLevel: "普通導師", program: "P
 // 只上小組的學生：「有常規私教課」不勾 → 儲存不查價、不填導師／課程／時段（weekday null），加入勾選的小組；導師篩選按小組導師歸類
 run('openStudentModal(-1)');
 check('新增學生：預設勾「有常規私教課」', getEl('modalHasSlot').checked === true);
+check('新增學生：學號自動填名單最大的 S 號碼加一（沒有和任何學生同號）', /^S\d{3}$/.test(getEl('modalId').value)
+    && run(`studentDatabase.every(s => !/^S\\d+$/.test(s.id) || Number(s.id.slice(1)) < ${Number(getEl('modalId').value.slice(1))})`)
+    && run(`Number(${JSON.stringify(getEl('modalId').value)}.slice(1)) === Math.max(...studentDatabase.filter(s => /^S\\d+$/.test(s.id)).map(s => Number(s.id.slice(1)))) + 1`));
 getEl('modalId').value = 'S090'; getEl('modalName').value = 'Student 090'; getEl('modalHasSlot').checked = false; getEl('modalTime').value = '';
 sandbox.__qsaHook = sel => (sel === '.modal-group-chk' ? [{ checked: true, value: 'G01' }] : []);
 const alertsBeforeGO = sandbox.alerts.length;

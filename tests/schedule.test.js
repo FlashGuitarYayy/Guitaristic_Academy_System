@@ -249,6 +249,21 @@ test('studentIdKey：前導零、大小寫、空白不影響；sameStudentId 空
     assert.ok(!S.sameStudentId('', ''));
 });
 
+test('nextStudentId：接名單最大號碼加一、位數跟最常見的寫法；已刪學生留下的學號也算用過；沒有可接的 → 0001', () => {
+    const demo = ['S001', 'S002', 'S003', 'S004', 'S005', 'S006', 'S020', 'S021', 'S022', 'S023', 'S024', 'S030', 'S031', 'S032'];
+    assert.strictEqual(S.nextStudentId(demo), 'S033', '演示名單');
+    assert.strictEqual(S.nextStudentId(['0212', '0160', '0032']), '0213', '四位數字（真實名單的寫法）');
+    assert.strictEqual(S.nextStudentId(['0212', '0160', '32']), '0213', '少寫零的不影響位數（最常見是四位）');
+    assert.strictEqual(S.nextStudentId(['0999']), '1000');
+    assert.strictEqual(S.nextStudentId(['9999']), '10000', '超過位數就多一位');
+    assert.strictEqual(S.nextStudentId(['S001', 'S002', '0500']), 'S003', '多數人用 S 開頭 → 接 S 的號碼，數字學號不影響');
+    assert.strictEqual(S.nextStudentId(demo, ['S050', '0900', 'S032']), 'S051', '課表裡已刪學生的 S050 算用過');
+    assert.strictEqual(S.nextStudentId([' s009 ', 'S010']), 'S011', '前後空白、大小寫不一 → 用名單最後一位的寫法');
+    assert.strictEqual(S.nextStudentId([]), '0001');
+    assert.strictEqual(S.nextStudentId(['Chan', '', null]), '0001', '沒有數字的學號不算');
+    assert.strictEqual(S.nextStudentId(['5', '7', '0012']), '13', '最常見是一位數 → 不補零');
+});
+
 // ===== 學生狀態：在學／停課 =====
 test('停課：未定復課 → 開始日起全部不生成（跨月也是）；編號只數實際生成的課', () => {
     const s = student({ inactivePeriods: [{ from: '2026-09-15', resume: '' }] });   // 週二

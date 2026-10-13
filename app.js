@@ -3251,6 +3251,13 @@
             }
         }
 
+        // 新增學生：學號自動接名單上最大的號碼加一（已刪學生在課表裡留下的學號也算用過，不會重用）
+        function suggestNewStudentId() {
+            const used = [];
+            Object.values(lessonsByMonth).forEach(arr => (arr || []).forEach(l => { if (l && l.studentId) used.push(l.studentId); }));
+            return GACSchedule.nextStudentId(studentDatabase.map(s => s.id), used);
+        }
+
         function openStudentModal(editIdx = -1) {
             const modal = document.getElementById('studentModal');
             const title = document.getElementById('modalTitle');
@@ -3280,7 +3287,7 @@
                 renderModalGroups(s.id);
             } else {
                 title.innerHTML = `<i class="fa-solid fa-user-plus text-emerald-500"></i> 新增學生資料`;
-                document.getElementById('modalId').value = '';
+                document.getElementById('modalId').value = suggestNewStudentId();
                 document.getElementById('modalName').value = '';
                 document.getElementById('modalPhone').value = '';
                 document.getElementById('modalEmail').value = '';
@@ -3294,6 +3301,8 @@
                 renderStudentFeeSelects({ tutorLevel: tutorTier(allTutorNames()[0]) || '普通導師', program: 'Pop Guitar', level: 'Elementary 初級', type: '一對一', duration: 45 });
                 renderModalGroups(null);
             }
+            const idHint = document.getElementById('modalIdHint');
+            if (idHint) idHint.classList.toggle('hidden', editIdx >= 0);
             onModalHasSlotChange();
             // 學生狀態：帶出「目前那一段」停課（正在停課／預定停課）；沒有＝在學
             const curStatus = editIdx >= 0 ? GACSchedule.currentInactivePeriod(studentDatabase[editIdx], localDateStr(new Date())) : null;
