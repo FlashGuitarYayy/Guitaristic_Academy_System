@@ -1,7 +1,7 @@
 // 現場診斷：學費查價與課表時間為何「對不上」。
 // 用法：在系統頁面按 F12 → Console，把整個檔案貼進去按 Enter。只讀不改任何資料，任何版本（2026-09-19 之後）都能跑。
 // 印出幾張表：版本線索、導師等級 vs 學生記錄上的導師級別、每位學生的查價路徑、已生成課堂 vs 目前名單的時間／導師／時長、
-// 學費條目 vs 現在重算的金額、學號／姓名撞號。最後回傳摘要物件；要帶走可按 copy(JSON.stringify(gacDiag))。
+// 學費條目 vs 現在重算的金額、課堂／學費條目用的學號與名單寫法不同（改過學號）、學號／姓名撞號。最後回傳摘要物件；要帶走可按 copy(JSON.stringify(gacDiag))。
 // 之後要看某一位：gacWhy('0032')——印出這位學生的查價鏈與各月課堂。
 (function () {
     'use strict';
@@ -16,7 +16,7 @@
     var gradeOf = fn('advancedGrade') ? advancedGrade : function (s) { return s.level; };
     var weekdayOf = function (d) { var p = String(d).split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]).getDay(); };
     var WD = ['日', '一', '二', '三', '四', '五', '六'];
-    var out = { version: [], tutors: [], tierMismatch: [], pricing: [], lessonMismatch: [], tuition: [], idClash: [], nameClash: [], notes: [] };
+    var out = { version: [], tutors: [], tierMismatch: [], pricing: [], lessonMismatch: [], tuition: [], idSpelling: [], idClash: [], nameClash: [], notes: [] };
 
     // ===== 0. 版本線索（功能出現的日期）=====
     [['2026-10-13 新增學生自動學號', lib('GACSchedule', 'nextStudentId')],
@@ -76,13 +76,22 @@
 
     // ===== 4. 已生成的課 vs 目前的名單（時間／星期／導師／時長／導師級別）=====
     var sById = {}; students.forEach(function (s) { sById[s.id] = s; });
+    // 名單上找不到一模一樣的學號時，用容錯鍵（032＝32）再找一次：找得到＝只是寫法不同，但系統各處是精確比對，會當成另一個人
+    var sByKey = {}; students.forEach(function (s) { sByKey[idKey(s.id)] = s; });
+    var spelling = {};
+    var noteSpelling = function (kind, usedId, month, status) {
+        var s2 = sByKey[idKey(usedId)];
+        var k = kind + '|' + usedId + '|' + month;
+        if (!spelling[k]) spelling[k] = { 類型: kind, 用的學號: usedId, 名單上的寫法: s2 ? s2.id + ' ' + s2.name : '（名單沒有這個人）', 月份: month, 筆數: 0, 狀態: {} };
+        spelling[k].筆數++; if (status) spelling[k].狀態[status] = (spelling[k].狀態[status] || 0) + 1;
+    };
     var gById = {}; groups.forEach(function (g) { gById[g.id] = g; });
     Object.keys(byMonth).sort().forEach(function (m) {
         var agg = {};
         (byMonth[m] || []).forEach(function (l) {
             if (l.isMakeup) return;
             var s = sById[l.studentId];
-            if (!s) { out.notes.push(m + '：課堂 ' + l.lessonId + ' 的學號不在名單（已刪？）'); return; }
+            if (!s) { noteSpelling('課堂', l.studentId, m, l.status); return; }
             var exp;
             if (l.groupId) { var g = gById[l.groupId]; if (!g) { out.notes.push(m + '：課堂 ' + l.lessonId + ' 的小組 ' + l.groupId + ' 已不存在'); return; } exp = { time: g.time, weekday: Number(g.weekday), tutor: g.tutor, duration: Number(g.duration), tutorLevel: g.tutorLevel || tierOf(g.tutor) || '' }; }
             else { var sc = lib('GACSchedule', 'getScheduleForMonth') ? GACSchedule.getScheduleForMonth(s, m) : { weekday: s.weekday, time: s.time }; exp = { time: sc.time, weekday: Number(sc.weekday), tutor: s.tutor, duration: Number(s.duration), tutorLevel: s.tutorLevel || tierOf(s.tutor) || '' }; }
@@ -104,11 +113,14 @@
     Object.keys(log).forEach(function (k) {
         var e = log[k];
         if (!e || e.type !== 'TUITION') return;
+        if (!sById[e.studentId]) { noteSpelling('學費條目', e.studentId, e.month, e.status); return; }
         var mine = (byMonth[e.month] || []).filter(function (l) { return l.studentId === e.studentId && !l.isMakeup; });
         var now = fn('rateForLesson') ? mine.reduce(function (sum, l) { return sum + (Number(rateForLesson(l)) || 0); }, 0) : null;
         if (now === null || now === Number(e.amount)) return;
         out.tuition.push({ 月份: e.month, 學號: e.studentId, 條目金額: e.amount, 現在重算: now, 堂數: mine.length, 狀態: e.status, 手改過: e.amountEdited ? '是' : '', 已收: e.paidAmount || 0 });
     });
+
+    Object.keys(spelling).forEach(function (k) { var a = spelling[k]; a.狀態 = Object.keys(a.狀態).map(function (st) { return st + '×' + a.狀態[st]; }).join(' '); out.idSpelling.push(a); });
 
     // ===== 6. 學號／姓名撞號（Calendar 按標題認人會混）=====
     var keys = {};
@@ -131,6 +143,7 @@
     show('3. 每位學生的查價路徑（每堂_系統用 ≠ 費率表_同級別 → 估算；看「說明」）', out.pricing);
     show('4. 已生成的課 ≠ 目前名單（改了名單沒有重新「生成」，或 Calendar 同步改過）', out.lessonMismatch);
     show('5. 學費條目 ≠ 現在重算（改價後要重新「生成」才更新；已發送的不會改）', out.tuition);
+    show('7. 課堂／學費條目用的學號 ≠ 名單上的寫法（改過學號、或換過 data.js 的補零寫法：這些課和條目已經不算在這位學生名下）', out.idSpelling);
     show('6a. 學號撞號', out.idClash);
     show('6b. 姓名撞號（Calendar 標題沒學號時按姓名認人）', out.nameClash);
     console.groupEnd();
@@ -145,9 +158,9 @@
         console.table([{ 導師: s.tutor, 記錄上的級別: s.tutorLevel || '(空)', 設定頁等級: tierOf(s.tutor), 查價用: tier, 課程: s.program, 級別: s.level, 形式: s.type, 時長: s.duration, 星期: s.weekday, 時間: s.time, 生效月份: s.effectiveMonth || '', 預定星期: s.futureWeekday, 預定時間: s.futureTime || '' }]);
         console.table(['普通導師', '資深導師'].map(function (t) { return { 若級別為: t, 費率表: exact(t, s) }; }).concat([{ 若級別為: '系統實際用', 費率表: usedRate(s) }]));
         var rows = [];
-        Object.keys(byMonth).sort().forEach(function (m) { (byMonth[m] || []).forEach(function (l) { if (l.studentId !== s.id) return; rows.push({ 月份: m, 日期: l.date, 時間: l.time, 時長: l.duration, 導師: l.tutor, 級別: l.tutorLevel || '(空)', 狀態: l.status, 補堂: l.isMakeup ? '是' : '', 小組: l.groupId || '', 每堂: fn('rateForLesson') ? rateForLesson(l) : '', 改期自: l.gcalMovedFrom ? JSON.stringify(l.gcalMovedFrom) : '', Calendar事件: l.gcalEventId ? '有' : '' }); }); });
+        Object.keys(byMonth).sort().forEach(function (m) { (byMonth[m] || []).forEach(function (l) { if (idKey(l.studentId) !== k) return; rows.push({ 月份: m, 課堂上的學號: l.studentId === s.id ? '' : l.studentId + '（寫法不同，不算他的）', 日期: l.date, 時間: l.time, 時長: l.duration, 導師: l.tutor, 級別: l.tutorLevel || '(空)', 狀態: l.status, 補堂: l.isMakeup ? '是' : '', 小組: l.groupId || '', 每堂: fn('rateForLesson') ? rateForLesson(l) : '', 改期自: l.gcalMovedFrom ? JSON.stringify(l.gcalMovedFrom) : '', Calendar事件: l.gcalEventId ? '有' : '' }); }); });
         console.table(rows);
-        Object.keys(log).forEach(function (key) { var e = log[key]; if (e && e.type === 'TUITION' && e.studentId === s.id) console.log('學費條目 ' + e.month + '：$' + e.amount + '（' + e.status + (e.amountEdited ? '，手改過' : '') + '）'); });
+        Object.keys(log).forEach(function (key) { var e = log[key]; if (e && e.type === 'TUITION' && idKey(e.studentId) === k) console.log('學費條目 ' + e.month + '：$' + e.amount + '（' + e.status + (e.amountEdited ? '，手改過' : '') + (e.studentId === s.id ? '' : '，學號寫法不同：' + e.studentId) + '）'); });
         console.groupEnd();
     };
     console.log('摘要在 gacDiag；看單一學生：gacWhy("學號")；帶走：copy(JSON.stringify(gacDiag))');
