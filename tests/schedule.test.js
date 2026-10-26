@@ -376,7 +376,7 @@ test('舊寫法的小組：同一位導師、同一時間、同課程級別時�
     assert.strictEqual(p.manual.length, 0);
     assert.strictEqual(p.ready.length, 1);
     const it = p.ready[0];
-    assert.deepStrictEqual(it.group, { program: 'Pop Guitar', level: 'Elementary 初級', duration: 60, tutor: 'Instructor A', tutorLevel: '普通導師', weekday: 3, time: '21:30', memberIds: ['S003', 'S004'] });
+    assert.deepStrictEqual(it.group, { program: 'Pop Guitar', level: 'Elementary 初級', duration: 60, tutor: 'Instructor A', weekday: 3, time: '21:30', memberIds: ['S003', 'S004'] });
     assert.strictEqual(it.rate, 400);
     assert.strictEqual(it.newRate, 400);
 });
@@ -410,4 +410,49 @@ test('小組班的開始月份：之前的月份不出課，當月起照常；�
     assert.strictEqual(nov[0].lessonId, 'S003-20261104-2130', 'lessonId 與舊寫法生成的相同（學號＋日期＋時間）');
     assert.strictEqual(S.nextMonthKey('2026-10'), '2026-11');
     assert.strictEqual(S.nextMonthKey('2026-12'), '2027-01');
+});
+
+test('generateMonthLessons／generateGroupMonthLessons：opts.tierOf（設定頁的導師等級）決定課堂上的導師級別；沒有 tierOf 才看記錄', () => {
+    const st = () => ({ id: 'S001', name: 'Student 001', tutor: 'Instructor A', program: 'Pop Guitar', level: 'Intermediate 中級', type: '一對一', duration: 45, weekday: 2, time: '21:30', tutorLevel: '普通導師' });
+    assert.strictEqual(S.generateMonthLessons(st(), '2026-09')[0].tutorLevel, '普通導師');
+    assert.strictEqual(S.generateMonthLessons(st(), '2026-09', { tierOf: () => '資深導師' })[0].tutorLevel, '資深導師');
+    assert.strictEqual(S.generateMonthLessons(st(), '2026-09', { tierOf: () => null })[0].tutorLevel, '普通導師', '名單上沒有這位導師 → 退回記錄');
+    const g = { id: 'G01', name: '小組', program: 'Music Theory', level: 'Grade 5', duration: 60, tutor: 'T', weekday: 6, time: '15:00', memberIds: ['S001'] };
+    assert.strictEqual(S.generateGroupMonthLessons(g, [st()], '2026-09', { tierOf: () => '資深導師' })[0].tutorLevel, '資深導師');
+});
+
+test('syncLessonsWithRoster：本月起的課按名單刷新計價／顯示欄位（級別來自 tierOf）；不動日期時間狀態；以前的月份、對不上學號的不動；補堂只改級別不改時長；可限定小組', () => {
+    const st = () => ({ id: 'S001', name: 'Student 001', phone: '00000000', tutor: 'Instructor A', program: 'Pop Guitar', level: 'Intermediate 中級', type: '一對一', duration: 45, weekday: 2, time: '21:30' });
+    const tier = () => '普通導師';
+    const buckets = { '2026-08': S.generateMonthLessons(st(), '2026-08', { tierOf: tier }), '2026-09': S.generateMonthLessons(st(), '2026-09', { tierOf: tier }) };
+    buckets['2026-09'][0].status = 'ATTENDED';
+    buckets['2026-09'].push({ lessonId: 'S001-20260930-1000', studentId: 'S001', studentName: 'Student 001', tutor: 'Instructor A', tutorLevel: '普通導師', program: 'Pop Guitar', level: 'Intermediate 中級', classType: '一對一', date: '2026-09-30', time: '10:00', duration: 15, baseDuration: 45, status: 'SCHEDULED', isMakeup: true });
+    buckets['2026-09'].push({ lessonId: 'S999-20260901-1000', studentId: 'S999', tutor: 'Instructor A', tutorLevel: '普通導師', date: '2026-09-01', time: '10:00', duration: 45, status: 'SCHEDULED' });
+    const roster = Object.assign(st(), { level: 'Advanced 高級', duration: 60, phone: '11111111' });
+    const opts = { students: [roster], groups: [], tierOf: () => '資深導師', fromMonth: '2026-09' };
+    const r = S.syncLessonsWithRoster(buckets, opts);
+    assert.deepStrictEqual(r.months, ['2026-09']);
+    assert.deepStrictEqual(r.studentIds, ['S001']);
+    assert.strictEqual(r.changed.length, 6, '9 月 5 堂常規＋1 堂補堂；8 月與 S999 不動');
+    const sep = buckets['2026-09'];
+    assert.strictEqual(sep[0].status, 'ATTENDED'); assert.strictEqual(sep[0].time, '21:30'); assert.strictEqual(sep[0].date, '2026-09-01');
+    assert.strictEqual(sep[0].tutorLevel, '資深導師'); assert.strictEqual(sep[0].level, 'Advanced 高級'); assert.strictEqual(sep[0].duration, 60); assert.strictEqual(sep[0].phone, '11111111');
+    assert.deepStrictEqual(r.changed[0].fields.slice().sort(), ['duration', 'level', 'phone', 'tutorLevel']);
+    const mu = sep.find(l => l.isMakeup);
+    assert.strictEqual(mu.duration, 15, '補堂時長不動'); assert.strictEqual(mu.tutorLevel, '資深導師'); assert.strictEqual(mu.level, 'Advanced 高級');
+    assert.strictEqual(buckets['2026-08'][0].tutorLevel, '普通導師', '以前的月份不動');
+    assert.strictEqual(sep.find(l => l.studentId === 'S999').tutorLevel, '普通導師', '學號不在名單：不動');
+    assert.strictEqual(S.syncLessonsWithRoster(buckets, opts).changed.length, 0, '再跑一次沒有差異');
+    assert.strictEqual(S.syncLessonsWithRoster(buckets, Object.assign({}, opts, { tierOf: () => null })).changed.length, 0, '名單上沒有這位導師 → 課上的級別保留');
+    // 小組：限定 groupIds 只動那個小組的課；形式按目前成員數
+    const g = { id: 'G01', name: '小組', program: 'Music Theory', level: 'Grade 5', duration: 60, tutor: 'Instructor B', weekday: 6, time: '15:00', memberIds: ['S001', 'S002'] };
+    const s2 = Object.assign(st(), { id: 'S002', name: 'Student 002' });
+    buckets['2026-09'].push(...S.generateGroupMonthLessons(g, [roster, s2], '2026-09', { tierOf: tier }));
+    g.memberIds.push('S003');
+    roster.level = 'Grade 8';   // 個別課的級別又改了，但這次只限定小組 → 不動
+    const r2 = S.syncLessonsWithRoster(buckets, { students: [roster, s2], groups: [g], tierOf: () => '資深導師', fromMonth: '2026-09', groupIds: ['G01'] });
+    assert.ok(r2.changed.length > 0 && r2.changed.every(c => buckets['2026-09'].find(l => l.lessonId === c.lessonId).groupId === 'G01'), '只動這個小組的課');
+    const gl = buckets['2026-09'].find(l => l.groupId === 'G01');
+    assert.strictEqual(gl.classType, '3人小組'); assert.strictEqual(gl.tutorLevel, '資深導師');
+    assert.strictEqual(sep[0].level, 'Advanced 高級', '限定小組時個別課不動');
 });

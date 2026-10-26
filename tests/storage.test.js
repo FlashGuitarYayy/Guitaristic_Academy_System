@@ -172,3 +172,23 @@ test('loadSettings：存檔裡是舊的三段模板 → 讀出來已是一整段
     assert.strictEqual(client.tplTuition, ST.DEFAULT_SETTINGS.tplTuition);
     assert.strictEqual(ST.createStore(fakeStorage({})).loadSettings().tplTuition, ST.DEFAULT_SETTINGS.tplTuition);
 });
+
+test('adoptTutorTiers：記錄上的 tutorLevel 一律拿掉；某導師名下全部一致且和名單不同 → 名單改用記錄的；混用 → 不動並列出', () => {
+    const tutors = [{ name: 'A', tier: '普通導師' }, { name: 'B', tier: '普通導師' }, { name: 'C', tier: '資深導師' }];
+    const students = [
+        { id: '1', tutor: 'A', weekday: 1, time: '10:00', tutorLevel: '資深導師' }, { id: '2', tutor: 'A', weekday: 2, time: '10:00', tutorLevel: '資深導師' },
+        { id: '3', tutor: 'B', weekday: 1, time: '10:00', tutorLevel: '資深導師' }, { id: '4', tutor: 'B', weekday: 2, time: '10:00', tutorLevel: '普通導師' },
+        { id: '5', tutor: 'C', weekday: null, time: '', tutorLevel: '普通導師' },   // 只上小組：不算
+        { id: '6', tutor: 'C', weekday: 3, time: '10:00' }
+    ];
+    const groups = [{ id: 'G1', tutor: 'A', tutorLevel: '資深導師', memberIds: [] }];
+    const r = ST.adoptTutorTiers(students, groups, tutors);
+    assert.deepStrictEqual(r.adopted, [{ name: 'A', from: '普通導師', to: '資深導師' }]);
+    assert.strictEqual(tutors[0].tier, '資深導師');
+    assert.strictEqual(tutors[1].tier, '普通導師', '混用：名單不動');
+    assert.deepStrictEqual(r.mixed, [{ name: 'B', tier: '普通導師', levels: { '資深導師': 1, '普通導師': 1 } }]);
+    assert.strictEqual(tutors[2].tier, '資深導師', '沒有記錄可比：不動');
+    assert.strictEqual(r.stripped, 6);
+    assert.ok(students.concat(groups).every(x => !('tutorLevel' in x)));
+    assert.deepStrictEqual(ST.adoptTutorTiers(students, groups, tutors), { adopted: [], mixed: [], stripped: 0 }, '再跑一次沒事');
+});

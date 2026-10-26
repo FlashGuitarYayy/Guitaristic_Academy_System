@@ -1031,8 +1031,8 @@
                 </div>
                 <!-- 費率連動：導師級別 → 課程 → 級別 → 上課形式 → 時長，只列費率表（art-rate-data.js）有定價的組合；每堂學費唯讀自動帶出 -->
                 <div class="modal-slot-field">
-                    <label class="block font-bold text-slate-600 mb-1">導師級別</label>
-                    <select id="modalTutorLevel" onchange="renderStudentFeeSelects()" class="w-full p-2 border border-slate-300 rounded-lg bg-white"></select>
+                    <label class="block font-bold text-slate-600 mb-1" title="一律跟設定頁「導師管理」裡這位導師的定價等級；要改到設定頁改，本月起的課與學費單會跟著重算">導師級別（跟設定頁）</label>
+                    <select id="modalTutorLevel" disabled class="w-full p-2 border border-slate-300 rounded-lg bg-slate-100 text-slate-600"></select>
                 </div>
                 <div class="modal-slot-field">
                     <label class="block font-bold text-slate-600 mb-1">課程類別 (Program)</label>
@@ -1126,8 +1126,8 @@
                     <select id="gmTutor" onchange="onGroupTutorChange()" class="w-full p-2 border border-slate-300 rounded-lg bg-white"></select>
                 </div>
                 <div>
-                    <label class="block font-bold text-slate-600 mb-1">導師級別（計費用）</label>
-                    <select id="gmTutorLevel" class="w-full p-2 border border-slate-300 rounded-lg bg-white">
+                    <label class="block font-bold text-slate-600 mb-1" title="一律跟設定頁「導師管理」裡這位導師的定價等級；要改到設定頁改">導師級別（跟設定頁）</label>
+                    <select id="gmTutorLevel" disabled class="w-full p-2 border border-slate-300 rounded-lg bg-slate-100 text-slate-600">
                         <option value="資深導師">資深導師</option>
                         <option value="普通導師">普通導師</option>
                     </select>

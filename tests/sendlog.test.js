@@ -32,8 +32,9 @@ test('C3/C4/C5: 標記已發（wa_link / manual）與移回待發', () => {
     assert.strictEqual(e.status, 'SENT');
     assert.strictEqual(e.method, 'wa_link');
     assert.strictEqual(e.sentAt, '2026-09-15T10:00:00.000Z');
-    // SENT 後 upsert 絕不改動
-    SL.upsertTuition(log, Object.assign(params(), { amount: 9999 }));
+    // SENT 後金額沒變 → 不動；金額變了（改等級／費率／課堂）→ 移回待發送並記下上次發出的，見 C9
+    SL.upsertTuition(log, params());
+    assert.strictEqual(e.status, 'SENT');
     assert.strictEqual(e.amount, 1500);
     // 移回待發 → 可重發
     SL.markUnsent(log, e.key);
@@ -374,4 +375,36 @@ test('fillTuitionTemplate：學費單的選填佔位符是 total／fps／notice�
     assert.deepStrictEqual(SL.TUITION_OPTIONAL, ['total', 'fps', 'notice', 'rules']);
     assert.strictEqual(SL.fillTuitionTemplate('a\n{details}\n總額：{total}\n{fps}\n{notice}\n{rules}',
         { details: 'd1\n\nd2', total: '', fps: '', notice: 'N', rules: '' }), 'a\nd1\n\nd2\nN');
+});
+
+test('C9: 已發送的學費單金額變了 → 沒收款、沒手改的移回待發送並記下上次發出的（重發後清掉）；已收款或手改過的只標 priceChanged；金額回到一樣就清掉標示', () => {
+    const log = {};
+    const e = SL.upsertTuition(log, params());
+    SL.markSent(log, e.key, 'wa_link', '2026-09-01T10:00:00.000Z');
+    SL.upsertTuition(log, Object.assign(params(), { amount: 1800, count: 6, now: '2026-09-05T00:00:00.000Z' }));
+    assert.strictEqual(e.status, 'TODO'); assert.strictEqual(e.amount, 1800); assert.strictEqual(e.count, 6); assert.strictEqual(e.sentAt, null);
+    assert.deepStrictEqual(e.resend, { amount: 1500, sentAt: '2026-09-01T10:00:00.000Z', method: 'wa_link', at: '2026-09-05T00:00:00.000Z' });
+    SL.markSent(log, e.key, 'manual', '2026-09-06T00:00:00.000Z');
+    assert.ok(!e.resend, '重發後標示清掉');
+    // 已收款：金額與狀態不動，只標示
+    SL.setPayment(log, e.key, { payMethod: '1' }, '2026-09-06');
+    SL.upsertTuition(log, Object.assign(params(), { amount: 2000 }));
+    assert.strictEqual(e.status, 'SENT'); assert.strictEqual(e.amount, 1800); assert.strictEqual(e.priceChanged.amount, 2000);
+    SL.upsertTuition(log, Object.assign(params(), { amount: 1800 }));
+    assert.ok(!e.priceChanged, '金額回到一樣 → 標示清掉');
+    // 手改過（已發送）：不動，只標示
+    const log2 = {};
+    const f = SL.upsertTuition(log2, params());
+    SL.setAmount(log2, f.key, 1400);
+    SL.markSent(log2, f.key, 'manual', '2026-09-01T10:00:00.000Z');
+    SL.upsertTuition(log2, Object.assign(params(), { amount: 1800 }));
+    assert.strictEqual(f.status, 'SENT'); assert.strictEqual(f.amount, 1400); assert.strictEqual(f.priceChanged.amount, 1800);
+    // 手改過（待發送）：金額不動，也標示
+    const log3 = {};
+    const h = SL.upsertTuition(log3, params());
+    SL.setAmount(log3, h.key, 1400);
+    SL.upsertTuition(log3, Object.assign(params(), { amount: 1800 }));
+    assert.strictEqual(h.amount, 1400); assert.strictEqual(h.priceChanged.amount, 1800);
+    SL.upsertTuition(log3, Object.assign(params(), { amount: 1400 }));
+    assert.ok(!h.priceChanged);
 });

@@ -13,6 +13,8 @@
             // 上一版叫「長假」（longLeaves）：改名為停課紀錄 inactivePeriods
             studentDatabase.forEach(s => { if (s.longLeaves) { if (!s.inactivePeriods) s.inactivePeriods = GACSchedule.normalizeInactivePeriods(s.longLeaves); delete s.longLeaves; } });
             groupClasses = gacStore.loadGroups(typeof defaultGroups !== 'undefined' ? defaultGroups : []);
+            // 導師級別一律跟設定頁的導師等級（2026-10-26）：記錄上的 tutorLevel 拿掉；名單等級和學生記錄不符時按記錄改（adoptTutorTiers）
+            const tierFix = GACStorage.adoptTutorTiers(studentDatabase, groupClasses, tutorsList);
             lessonsByMonth = gacStore.loadLessons();
             GACLessonState.normalizeLessons(lessonsByMonth);   // 舊格式：一堂請假一個補堂 → 多個
             stampLessonChanges(true);
@@ -20,6 +22,7 @@
             appSettings = gacStore.loadSettings();
             actionHistory = gacStore.loadHistory();
             if (freshFileStart) startFreshFileState();
+            if (tierFix.stripped || tierFix.adopted.length) finishTierMigration(tierFix);
             if (gacStore.errors.length) {
                 alert('⚠️ 部分本機資料載入失敗（已回退預設值）：\n' + gacStore.errors.join('\n'));
             }
@@ -43,6 +46,85 @@
             window.addEventListener('pagehide', saveViewState);
             maybeOfferLegacyGroupConvert();   // 舊寫法的小組（常規課寫「2人小組」等）：有可以直接轉的就問一次
         };
+
+        // ===== 更新鏈（2026-10-26 用戶要的）：名單／導師等級／費率改了 → 本月起已生成的課跟著改 → 這些月份的學費單重算 =====
+        // 以前的月份是歷史定價，不動（要改就到該月按「生成」）。課堂欄位由 GACSchedule.syncLessonsWithRoster 刷新（不動日期時間狀態）；
+        // 學費單規則在 lib/sendlog.js：未發送的直接更新；已發送、沒收款、沒手改的金額變了就移回待發送（記下上次發出的金額，refreshSentTuition）；
+        // 已收款或手改過的只標示。opts = { studentIds?, groupIds?（限定範圍）, lessons=true（false＝只重算學費單，例如改價）, render=true }
+        function propagateRosterChanges(opts) {
+            const o = opts || {};
+            const fromMonth = localDateStr(new Date()).slice(0, 7);
+            const sync = o.lessons === false ? { changed: [], months: [], studentIds: [] }
+                : GACSchedule.syncLessonsWithRoster(lessonsByMonth, { students: studentDatabase, groups: groupClasses, tierOf: tutorTier, fromMonth: fromMonth, studentIds: o.studentIds, groupIds: o.groupIds });
+            const before = {};
+            Object.keys(sendLog).forEach(k => { const e = sendLog[k]; if (e && e.type === 'TUITION') before[k] = { status: e.status, amount: e.amount, flagged: !!e.priceChanged }; });
+            const nowIso = new Date().toISOString();
+            Object.keys(lessonsByMonth).filter(m => m >= fromMonth).sort().forEach(monthKey => {
+                const regular = (lessonsByMonth[monthKey] || []).filter(l => !l.isMakeup);
+                let ids;
+                if (!o.studentIds && !o.groupIds) ids = new Set(regular.map(l => l.studentId));
+                else {
+                    ids = new Set((o.studentIds || []).concat(sync.studentIds));
+                    if (o.groupIds) regular.forEach(l => { if (l.groupId && o.groupIds.indexOf(l.groupId) !== -1) ids.add(l.studentId); });
+                }
+                ids.forEach(id => { const s = studentDatabase.find(x => x.id === id); if (s) refreshTuition(s, monthKey, nowIso); });
+            });
+            let updated = 0, resend = 0, flagged = 0;
+            Object.keys(sendLog).forEach(k => {
+                const e = sendLog[k], b = before[k];
+                if (!e || e.type !== 'TUITION' || !b) return;
+                if (b.status === 'SENT' && e.status === 'TODO') resend++;
+                else if (e.amount !== b.amount) updated++;
+                if (e.priceChanged && !b.flagged) flagged++;
+            });
+            if (sync.changed.length) persistLessons(); else persistSendlog();
+            if (o.render !== false) renderAll();
+            return { lessons: sync.changed.length, months: sync.months, updated: updated, resend: resend, flagged: flagged };
+        }
+
+        // 更新鏈的結果，一句話（toast／提示用）；沒有任何改動 → ''
+        function propagateSummaryText(r) {
+            const parts = [];
+            if (!r) return '';
+            if (r.lessons) parts.push(`本月起 ${r.lessons} 堂課已更新`);
+            if (r.updated) parts.push(`${r.updated} 張未發送的學費單已重算`);
+            if (r.resend) parts.push(`${r.resend} 張已發送的學費單金額變了，已移回待發送（請重發）`);
+            if (r.flagged) parts.push(`${r.flagged} 張已收款／手改的學費單金額有變，請到發送中心處理`);
+            return parts.join('；');
+        }
+
+        function propagateToast(prefix, r) {
+            const sum = propagateSummaryText(r);
+            showToast(`✅ ${prefix}${sum ? '：' + sum : ''}`, sum ? 7000 : undefined);
+        }
+
+        // 第一次用這版打開（記錄上的 tutorLevel 已由 adoptTutorTiers 拿掉）：存檔；名單等級有改／有混用 → 說明一次；本月起按設定頁等級重算
+        function finishTierMigration(fix) {
+            saveToLocalStorage(); persistGroups(); persistTutors();
+            const r = propagateRosterChanges({ render: false });
+            const lines = [];
+            fix.adopted.forEach(a => lines.push(`導師「${a.name}」的定價等級由 ${a.from} 改為 ${a.to}（按他名下學生記錄上的級別）`));
+            fix.mixed.forEach(m => lines.push(`導師「${m.name}」設定頁是 ${m.tier}，但學生記錄上有 ${Object.keys(m.levels).map(k => `${k} ${m.levels[k]} 位`).join('、')}——請到設定 → 導師管理確認`));
+            const sum = propagateSummaryText(r);
+            if (lines.length) alert('導師級別現在一律跟設定頁的導師等級（學生／小組表單不再各自設級別）：\n' + lines.join('\n') + (sum ? '\n' + sum : ''));
+            else if (sum) showToast('✅ 導師級別改為跟設定頁：' + sum, 7000);
+        }
+
+        // 學生／小組表單的「導師級別」那格：只顯示所選導師在設定頁的等級，不能改
+        function lockTierSelect(id, tier) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            fillSelect(el, [tier], tier, v => `${v}（跟導師設定）`);
+            el.disabled = true;
+        }
+
+        // 發送中心學費卡：金額後來變了的標示（lib/sendlog.js refreshSentTuition 記的 resend／priceChanged）
+        function tuitionChangeNote(e) {
+            const money = v => '$' + Number(v || 0).toLocaleString('en-US');
+            if (e.resend) return `<div class="text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1"><i class="fa-solid fa-triangle-exclamation"></i> 金額變了：上次於 ${String(e.resend.sentAt || '').replace('T', ' ').slice(0, 16)} 發出的是 ${money(e.resend.amount)}，現為 ${money(e.amount)}，請重新發送</div>`;
+            if (e.priceChanged) return `<div class="text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1"><i class="fa-solid fa-triangle-exclamation"></i> 費率／課堂後來改了：現算 ${money(e.priceChanged.amount)}（此單${e.amountEdited ? '金額手改過' : '已收款'}，沒有自動改，請人工處理）</div>`;
+            return '';
+        }
 
         // ===== 資料存放（檔案模式，見 lib/storage.js pickStorage）=====
         // 本資料夾第一次啟動（或刪了 local-state.json 重來）：填回 serve.js 另存的帳號資料（local-credentials.json）並立刻建檔；
@@ -829,7 +911,7 @@
             document.getElementById('gmProgram').value = g ? (g.program || '') : '';
             document.getElementById('gmLevel').value = g ? (g.level || '') : '';
             document.getElementById('gmTutor').value = g ? g.tutor : tutors[0] || '';
-            document.getElementById('gmTutorLevel').value = g ? (g.tutorLevel || advancedTutor({ tutor: g.tutor })) : (tutorTier(tutors[0]) || '普通導師');
+            document.getElementById('gmTutorLevel').value = tutorTier(g ? g.tutor : tutors[0]) || '普通導師';   // 只顯示：一律跟設定頁的導師等級
             document.getElementById('gmDuration').value = g ? (g.duration || 60) : 60;
             document.getElementById('gmWeekday').value = g ? g.weekday : 6;
             document.getElementById('gmTime').value = g ? g.time : '15:00';
@@ -915,7 +997,6 @@
                 program: document.getElementById('gmProgram').value.trim(),
                 level: document.getElementById('gmLevel').value.trim(),
                 tutor: document.getElementById('gmTutor').value,
-                tutorLevel: document.getElementById('gmTutorLevel').value,
                 duration: parseInt(document.getElementById('gmDuration').value) || 60,
                 weekday: weekday, time: time,
                 memberIds: [...groupModalMembers]
@@ -928,8 +1009,11 @@
             renderBatchCheckboxes();
             renderStudentTable();
             closeGroupModal();
+            // 更新鏈：本月起已生成的小組課按新資料刷新（課程／級別／時長／導師／人數），學費單重算；改時段或成員仍要「生成」
+            const prop = gid ? propagateRosterChanges({ groupIds: [g.id] }) : null;
             const genMonths = Object.keys(lessonsByMonth).sort();
             showToast(`✅ 已儲存小組「${g.name}」（${g.memberIds.length} 位成員，逢${getWeekdayName(g.weekday)} ${g.time}）` +
+                (propagateSummaryText(prop) ? `\n${propagateSummaryText(prop)}` : '') +
                 (genMonths.length ? `\n記得到 ${genMonths.join('、')} 按「生成」套用` : ''));
         }
 
@@ -955,7 +1039,7 @@
         const LEGACY_GROUP_LATER_KEY = 'gac_legacy_group_later';   // 這個分頁已自動彈過（sessionStorage）：載入時不再彈
 
         function legacyGroupPlan() {
-            return GACSchedule.planLegacyGroups(studentDatabase, groupClasses, rateForLesson);
+            return GACSchedule.planLegacyGroups(studentDatabase, groupClasses, rateForLesson, tutorTier);
         }
 
         // 小組班名：「課程 級別 小組」，撞名再加上星期時間
@@ -1068,10 +1152,10 @@
                 // 本月及之後已生成的月份：他們的課改成小組課（生成的小組課 lessonId 與原本的相同 → 命中、保留狀態，只刷新顯示欄位）
                 const months = legacyGeneratedMonths(g.memberIds, st.startMonth);
                 // 這幾位改成只上小組（同學生表單不勾「有常規私教課」）
-                members.forEach(s => Object.assign(s, { type: '', program: '', level: '', tutor: '', tutorLevel: '', weekday: null, time: '', duration: null,
+                members.forEach(s => Object.assign(s, { type: '', program: '', level: '', tutor: '', weekday: null, time: '', duration: null,
                     effectiveMonth: '', futureWeekday: null, futureTime: '' }));
                 months.forEach(monthKey => {
-                    const res = GACSchedule.mergeMonthLessons(lessonsByMonth[monthKey] || [], GACSchedule.generateGroupMonthLessons(g, members, monthKey), {
+                    const res = GACSchedule.mergeMonthLessons(lessonsByMonth[monthKey] || [], GACSchedule.generateGroupMonthLessons(g, members, monthKey, { tierOf: tutorTier }), {
                         selectedStudentIds: g.memberIds, allStudentIds: studentDatabase.map(s => s.id),
                         selectedGroupIds: [g.id], allGroupIds: groupClasses.map(x => x.id)
                     });
@@ -1297,10 +1381,10 @@
             const selectedGroups = [...groupBoxes].map(chk => findGroup(chk.value)).filter(Boolean);
             pushHistory(`生成課表：${monthKey}（${selectedStudents.length} 位學生、${selectedGroups.length} 個小組）`);
             const generated = [];
-            selectedStudents.forEach(s => generated.push(...GACSchedule.generateMonthLessons(s, monthKey)));
+            selectedStudents.forEach(s => generated.push(...GACSchedule.generateMonthLessons(s, monthKey, { tierOf: tutorTier })));
             selectedGroups.forEach(g => {
                 const members = (g.memberIds || []).map(id => studentDatabase.find(s => s.id === id)).filter(Boolean);
-                generated.push(...GACSchedule.generateGroupMonthLessons(g, members, monthKey));
+                generated.push(...GACSchedule.generateGroupMonthLessons(g, members, monthKey, { tierOf: tutorTier }));
             });
 
             const res = GACSchedule.mergeMonthLessons(currentMonthLessons(), generated, {
@@ -3377,14 +3461,14 @@
                 if (!doIndiv && !groups.length) return;
                 const added = [], removed = [], kept = [];
                 if (doIndiv) {
-                    const res = GACSchedule.mergeMonthLessons(bucket, GACSchedule.generateMonthLessons(student, monthKey),
+                    const res = GACSchedule.mergeMonthLessons(bucket, GACSchedule.generateMonthLessons(student, monthKey, { tierOf: tutorTier }),
                         { selectedStudentIds: [student.id], allStudentIds: studentDatabase.map(s => s.id), selectedGroupIds: [], allGroupIds: groupClasses.map(g => g.id) });
                     bucket = res.lessons;
                     added.push(...res.added); removed.push(...res.removed); kept.push(...res.conflicts.map(c => c.lesson));
                 }
                 groups.forEach(g => {
                     const members = (g.memberIds || []).map(id => studentDatabase.find(s => s.id === id)).filter(Boolean);
-                    const res = GACSchedule.mergeMemberGroupLessons(bucket, GACSchedule.generateGroupMonthLessons(g, members, monthKey).filter(mine), g.id, student.id);
+                    const res = GACSchedule.mergeMemberGroupLessons(bucket, GACSchedule.generateGroupMonthLessons(g, members, monthKey, { tierOf: tutorTier }).filter(mine), g.id, student.id);
                     bucket = res.lessons;
                     added.push(...res.added); removed.push(...res.removed); kept.push(...res.conflicts.map(c => c.lesson));
                 });
@@ -3580,23 +3664,31 @@
             updateLegacyNote();
             const rateEl = document.getElementById('modalRate');
             if (locked) {
-                const sel = initial || readFeeSelection();
+                const sel = Object.assign({}, initial || readFeeSelection());
+                const tierLocked = tutorTier(document.getElementById('modalTutor').value);
+                if (tierLocked) sel.tutorLevel = tierLocked;
                 Object.keys(FEE_SELECT_IDS).forEach(k => {
                     const el = document.getElementById(FEE_SELECT_IDS[k]);
                     if (el) fillSelect(el, [sel[k]], sel[k], k === 'type' ? (v => `${v}（舊寫法）`) : (k === 'duration' ? (v => `${v} 分鐘`) : null));
                 });
+                lockTierSelect('modalTutorLevel', sel.tutorLevel);
                 const rate = rateForLesson({ program: sel.program, level: sel.level, classType: sel.type, duration: sel.duration,
                     tutor: document.getElementById('modalTutor').value, tutorLevel: sel.tutorLevel });
                 if (rateEl) rateEl.textContent = `$${Number(rate).toLocaleString('en-US')} / 堂（${sel.type}，照舊）`;
                 return { sel: sel, rate: rate };
             }
-            const res = GACRates.resolve(individualRateRows(), initial || readFeeSelection());
+            // 導師級別一律跟設定頁：按表單上選的導師查等級，那一格只顯示、不能改
+            const sel0 = Object.assign({}, initial || readFeeSelection());
+            const tierNow = tutorTier(document.getElementById('modalTutor').value);
+            if (tierNow) sel0.tutorLevel = tierNow;
+            const res = GACRates.resolve(individualRateRows(), sel0);
             Object.keys(FEE_SELECT_IDS).forEach(k => {
                 const el = document.getElementById(FEE_SELECT_IDS[k]);
                 if (!el) return;
                 const labelFn = k === 'type' ? GACRates.studentTypeToClassType : (k === 'duration' ? (v => `${v} 分鐘`) : null);
                 fillSelect(el, res.options[k], res.sel[k], labelFn);
             });
+            lockTierSelect('modalTutorLevel', res.sel.tutorLevel);
             if (rateEl) rateEl.textContent = res.rate !== null ? `$${Number(res.rate).toLocaleString('en-US')} / 堂` : '—（費率表無此組合）';
             return res;
         }
@@ -3623,7 +3715,7 @@
             const program = hasSlot ? document.getElementById('modalProgram').value.trim() : '';
             const level = hasSlot ? document.getElementById('modalLevel').value.trim() : '';
             const tutor = hasSlot ? document.getElementById('modalTutor').value : '';
-            const tutorLevel = hasSlot ? document.getElementById('modalTutorLevel').value : '';
+            const tutorLevel = hasSlot ? (tutorTier(tutor) || document.getElementById('modalTutorLevel').value) : '';   // 查價用：一律跟設定頁的導師等級（表單那格只顯示）
             const weekday = hasSlot ? parseInt(document.getElementById('modalWeekday').value) : null;
             const time = hasSlot ? document.getElementById('modalTime').value : '';
             const duration = hasSlot ? parseInt(document.getElementById('modalDuration').value) : null;
@@ -3660,7 +3752,7 @@
             // 舊寫法的學生改成一對一：收費會變，先問一次
             if (editIdx >= 0 && hasSlot && modalLegacyType && modalSlotUnlocked) {
                 const old = studentDatabase[editIdx];
-                const before = rateForLesson({ program: old.program, level: old.level, classType: old.type, duration: old.duration, tutor: old.tutor, tutorLevel: old.tutorLevel });
+                const before = rateForLesson({ program: old.program, level: old.level, classType: old.type, duration: old.duration, tutor: old.tutor, tutorLevel: tutorTier(old.tutor) });
                 const after = rateForLesson({ program, level, classType: type, duration, tutor, tutorLevel });
                 if (!confirm(`「${name}」的常規課原本是「${old.type}」（每堂 $${before}），存檔後改成一對一（每堂 $${after}）。\n已生成的月份要到該月按「生成」才會套用。\n確定嗎？`)) return;
             }
@@ -3677,7 +3769,7 @@
                 student.program = program;
                 student.level = level;
                 student.tutor = tutor;
-                student.tutorLevel = tutorLevel;
+                delete student.tutorLevel;   // 級別跟設定頁的導師等級，不存在記錄上
                 student.weekday = weekday;
                 student.time = time;
                 student.duration = duration;
@@ -3686,7 +3778,7 @@
             } else {
                 // Add New Student
                 studentDatabase.push(Object.assign({
-                    id, name, phone, email, type, program, level, duration, tutor, tutorLevel, weekday, time,
+                    id, name, phone, email, type, program, level, duration, tutor, weekday, time,
                     effectiveMonth: "", futureWeekday: null, futureTime: ""
                 }, inactivePeriods.length ? { inactivePeriods } : {}));
             }
@@ -3700,6 +3792,8 @@
             persistGroups();
 
             saveToLocalStorage();
+            // 更新鏈：本月起已生成的課按新資料刷新（課程／級別／時長／導師／電話…），學費單重算；改星期／時間仍要「生成」
+            const prop = (editIdx >= 0 && oldId === id) ? propagateRosterChanges({ studentIds: [id], render: false }) : null;
             // 狀態（在學／停課）改了 → 已生成的月份要不要跟著處理（改了學號的不處理：課表仍記在舊學號下）
             const statusNote = (editIdx >= 0 && oldId === id && JSON.stringify(oldPeriods) !== JSON.stringify(inactivePeriods))
                 ? offerScheduleSyncAfterStatusChange(studentDatabase[editIdx], oldPeriods) : '';
@@ -3707,7 +3801,7 @@
             renderStudentTable();
             closeStudentModal();
             renderAll();
-            showToast(`✅ 已${editIdx >= 0 ? '更新' : '新增'}學生 ${name}（${id}）${statusNote ? '\n' + statusNote : ''}`);
+            showToast(`✅ 已${editIdx >= 0 ? '更新' : '新增'}學生 ${name}（${id}）${propagateSummaryText(prop) ? '\n' + propagateSummaryText(prop) : ''}${statusNote ? '\n' + statusNote : ''}`);
             // 這次是把他設成停課（或改了停課日期）：所屬小組若因此只剩一位在學 → 提示怎麼安排
             if (statusEdit.inactive && JSON.stringify(oldPeriods) !== JSON.stringify(inactivePeriods)) {
                 const saved = studentDatabase.find(s => s.id === id);
@@ -3937,6 +4031,9 @@
             pushHistory(label);
             const memo = Object.assign({}, appSettings.tutorCalendarMemo || {});
             tutorsList.forEach(t => { if (t.calendarId) memo[t.name] = t.calendarId; });
+            // 導師等級也按名字記住（tutorTierMemo）：檔案沒有導師名單、要從學生推出來時用備忘，不會把等級重設成預設值；檔案明寫了名單就用檔案的
+            const tierMemo = Object.assign({}, appSettings.tutorTierMemo || {});
+            tutorsList.forEach(t => { if (t.tier) tierMemo[t.name] = t.tier; });
             const leavesByKey = {};
             studentDatabase.forEach(s => { if (s.inactivePeriods && s.inactivePeriods.length) leavesByKey[GACSchedule.studentIdKey(s.id)] = s.inactivePeriods; });
             studentDatabase = (src.students || []).map(s => {
@@ -3948,25 +4045,28 @@
             groupClasses = (src.groups || []).map(g => Object.assign({}, g, { memberIds: (g.memberIds || []).slice() }));
             const fromFile = (Array.isArray(src.tutors) && src.tutors.length) ? src.tutors : null;
             tutorsList = (fromFile || GACStorage.tutorsFromRoster(studentDatabase, groupClasses)).map(t => {
-                const out = { name: t.name, tier: t.tier === '資深導師' ? '資深導師' : '普通導師' };
+                const out = { name: t.name, tier: (fromFile ? '' : tierMemo[t.name]) || (t.tier === '資深導師' ? '資深導師' : '普通導師') };
                 const cal = memo[t.name] || t.calendarId || '';
                 if (cal) out.calendarId = cal;
                 return out;
             });
             appSettings.tutorCalendarMemo = memo;
+            appSettings.tutorTierMemo = tierMemo;
+            GACStorage.adoptTutorTiers(studentDatabase, groupClasses, []);   // 記錄上的 tutorLevel 拿掉（等級跟名單）
             gacStore.saveSettings(appSettings);
             persistTutors();
             persistGroups();
             saveToLocalStorage();
             afterTutorsChanged();
             renderStudentTable();
-            return { students: studentDatabase.length, groups: groupClasses.length, tutors: tutorsList.length, derivedTutors: !fromFile };
+            const prop = propagateRosterChanges({ render: false });   // 本月起已生成的課按新名單刷新、學費單重算
+            return { students: studentDatabase.length, groups: groupClasses.length, tutors: tutorsList.length, derivedTutors: !fromFile, prop: prop };
         }
 
         function resetToDefaultData() {
             if (!confirm('從 data.js 重新載入學生名單、小組班與導師名單，蓋過目前的版本？\n（課表、發送紀錄、設定不動；導師日曆 ID 按名字記住；目前名單可按「撤銷」救回）')) return;
             const r = applyRoster({ students: defaultStudents, groups: typeof defaultGroups !== 'undefined' ? defaultGroups : [], tutors: typeof defaultTutors !== 'undefined' ? defaultTutors : [] }, '從 data.js 重新載入名單');
-            showToast(`✅ 已從 data.js 重新載入：學生 ${r.students}、小組班 ${r.groups}、導師 ${r.tutors}${r.derivedTutors ? '（data.js 沒有導師名單，已從學生資料推出）' : ''}`, 6000);
+            showToast(`✅ 已從 data.js 重新載入：學生 ${r.students}、小組班 ${r.groups}、導師 ${r.tutors}${r.derivedTutors ? '（data.js 沒有導師名單，已從學生資料推出）' : ''}${propagateSummaryText(r.prop) ? '\n' + propagateSummaryText(r.prop) : ''}`, 6000);
         }
 
         // 「還原演示名單」：demo_data.js 的脫敏演示名單（S001… 學生、Instructor A／B、樂理小組），與 data.js 無關；換了真實名單後想回到演示情境用
@@ -3974,7 +4074,7 @@
             if (typeof demoStudents === 'undefined') { alert('找不到 demo_data.js（index.html 應在 data.js 之後載入它）。'); return; }
             if (!confirm('還原演示名單（demo_data.js：S001… 學生、Instructor A／B、樂理小組），蓋過目前的學生、小組班與導師名單？\n（課表、發送紀錄、設定不動；導師日曆 ID 按名字記住；目前名單可按「撤銷」救回。要演示課表請之後「全部清場」再「生成」）')) return;
             const r = applyRoster({ students: demoStudents, groups: typeof demoGroups !== 'undefined' ? demoGroups : [], tutors: typeof demoTutors !== 'undefined' ? demoTutors : [] }, '還原演示名單');
-            showToast(`✅ 已還原演示名單：學生 ${r.students}、小組班 ${r.groups}、導師 ${r.tutors}`, 6000);
+            showToast(`✅ 已還原演示名單：學生 ${r.students}、小組班 ${r.groups}、導師 ${r.tutors}${propagateSummaryText(r.prop) ? '\n' + propagateSummaryText(r.prop) : ''}`, 6000);
         }
 
         // ===== 課堂訊息（請假確認／補堂確認／改期通知）：文案在設定頁「訊息模板」，留空用預設；顯示時才組成 =====
@@ -4414,6 +4514,7 @@
                         ${sentInfo}
                     </div>
                     ${amountRow}
+                    ${e.type === 'TUITION' ? tuitionChangeNote(e) : ''}
                     ${sendMsgBlock(e, msg)}
                     <div class="flex items-center gap-1.5 flex-wrap">${actions}</div>
                 </div>`;
@@ -4999,7 +5100,10 @@
             t.tier = tier;
             persistTutors();
             afterTutorsChanged();
-            showToast(`✅ ${name} 的定價等級改為 ${tier}（已登記學生的導師級別不變，逐一編輯可更新）`);
+            // 更新鏈：他名下的學生與小組，本月起的課改按新等級計價，學費單重算
+            const ids = studentDatabase.filter(s => s.tutor === name).map(s => s.id);
+            const gids = groupClasses.filter(g => g.tutor === name).map(g => g.id);
+            propagateToast(`${name} 的定價等級改為 ${tier}`, propagateRosterChanges({ studentIds: ids, groupIds: gids }));
         }
 
         function deleteTutor(name) {
@@ -5176,7 +5280,7 @@
 
         function afterRatesChanged() {
             renderRateTableEditor();
-            renderAll(); // 薪酬／分析／繳費顯示按新價；學費條目金額要重新「生成」才更新
+            propagateToast('已改價', propagateRosterChanges({ lessons: false }));   // 本月起的學費單按新價重算；薪酬／分析／繳費即時按新價
         }
 
         // ===== 設定頁模組摺疊：開合狀態只存本機 gac_settings_open（UI 便利，不入備份；預設全部收起）=====

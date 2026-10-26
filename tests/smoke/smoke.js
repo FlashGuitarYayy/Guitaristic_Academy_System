@@ -913,8 +913,8 @@ run('openStudentModal(0)'); // S001：普通導師 Pop Guitar Intermediate 中�
 check('開啟學生表單：下拉已填、每堂學費帶出（普通導師 Pop 中級 一對一 45 = $360）', getEl('modalTutorLevel').value === '普通導師'
     && getEl('modalProgram').innerHTML.includes('Classical Guitar') && getEl('modalLevel').value === 'Intermediate 中級'
     && getEl('modalType').value === '一對一' && getEl('modalDuration').value === '45' && getEl('modalRate').textContent === '$360 / 堂');
-getEl('modalTutorLevel').value = '資深導師'; getEl('modalProgram').value = 'Classical Guitar'; getEl('modalLevel').value = 'Grade 7'; getEl('modalDuration').value = '30';
-run('renderStudentFeeSelects()');
+getEl('modalTutor').value = 'Instructor B'; getEl('modalProgram').value = 'Classical Guitar'; getEl('modalLevel').value = 'Grade 7'; getEl('modalDuration').value = '30';
+run('onModalTutorChange()');   // 導師級別一律跟所選導師（Instructor B＝資深）
 check('改為資深 Classical Grade 7：30 分鐘無定價 → 時長改 45、學費 $500、時長選項只剩 45/60', getEl('modalDuration').value === '45'
     && getEl('modalRate').textContent === '$500 / 堂' && !getEl('modalDuration').innerHTML.includes('value="30"') && getEl('modalDuration').innerHTML.includes('value="60"'));
 getEl('modalType').value = '2人小組';
@@ -926,9 +926,9 @@ check('回到 Grade 5：形式只有一對一（小組一律用小組班）、30
     && getEl('modalDuration').innerHTML.includes('value="30"') && getEl('modalRate').textContent === '$420 / 堂');
 sandbox.__qsaHook = () => [];
 run('saveStudentFromModal()');
-check('儲存：導師級別／課程／級別／時長寫入學生記錄', run('studentDatabase[0].tutorLevel') === '資深導師' && run('studentDatabase[0].program') === 'Classical Guitar'
+check('儲存：導師／課程／級別／時長寫入學生記錄；導師級別不存在記錄上（跟設定頁）', run('studentDatabase[0].tutor') === 'Instructor B' && !run('"tutorLevel" in studentDatabase[0]') && run('studentDatabase[0].program') === 'Classical Guitar'
     && run('studentDatabase[0].level') === 'Grade 5' && run('studentDatabase[0].duration') === 45);
-run('Object.assign(studentDatabase[0], { tutorLevel: "普通導師", program: "Pop Guitar", level: "Intermediate 中級", type: "一對一", duration: 45 }); saveToLocalStorage(); renderStudentTable();');
+run('Object.assign(studentDatabase[0], { tutor: "Instructor A", program: "Pop Guitar", level: "Intermediate 中級", type: "一對一", duration: 45 }); saveToLocalStorage(); renderStudentTable(); propagateRosterChanges({ studentIds: ["S001"] });');   // 還原，本月起的課一併同步回來
 // 只上小組的學生：「有常規私教課」不勾 → 儲存不查價、不填導師／課程／時段（weekday null），加入勾選的小組；導師篩選按小組導師歸類
 run('openStudentModal(-1)');
 check('新增學生：預設勾「有常規私教課」', getEl('modalHasSlot').checked === true);
@@ -967,7 +967,7 @@ run('onQuickEditFeeChange()');
 check('升班到 Advanced：45 分鐘仍有定價 → 保留、學費 $440、無 30 分鐘選項', getEl('qeDuration').value === '45'
     && getEl('qeRate').textContent.includes('$440') && !getEl('qeDuration').innerHTML.includes('value="30"'));
 run("requestCloseModal('quickEditModal')");
-check('小組課費率：G01 課堂帶 tutorLevel（資深）', run('groupClasses[0].tutorLevel') === '資深導師');
+check('小組課費率：G01 的級別跟設定頁的導師等級（Instructor B＝資深），小組記錄不帶級別', run('tutorTier(groupClasses[0].tutor)') === '資深導師' && !run('"tutorLevel" in groupClasses[0]'));
 
 // 29) 出席與繳費：重新生成 9 月（清場後）→ 每生一行；勾已繳／實收／已發送與發送中心同步；學費單尾段設定
 console.log('[27] 出席與繳費');
@@ -3171,7 +3171,9 @@ console.log('[45] 舊寫法的小組轉成小組班');
     sandbox.__qsaHook = hookWas;
     getEl('batchMonth').value = monthWas;
     run('closeMsgModal(); onBatchMonthChange()');
-    check('清理完成', run(S3 + '.type') === '2人小組' && run(S3 + '.phone') !== '91234567' && sepState() === sepBefore);
+    // 存過電話之後 9 月的課跟著改了電話（更新鏈），放回快照後課也回到快照的樣子
+    check('清理完成', run(S3 + '.type') === '2人小組' && run(S3 + '.phone') !== '91234567'
+        && sepState() === JSON.stringify(JSON.parse(snap).l['2026-09'].slice().sort((a, b) => (a.lessonId < b.lessonId ? -1 : 1)).map(l => Object.assign({}, l, { changedAt: undefined }))));
 })();
 
 // 46) 分段補堂（課後加時）：一堂請假分幾段補；每段是接在常規課後面的 15 分鐘補堂課；薪酬按比例；主課改期／改狀態跟著走；一條訊息。隔離在 2027-01
@@ -3279,6 +3281,62 @@ console.log('[46] 分段補堂（課後加時）');
     run('switchView("calendar"); onBatchMonthChange()');
     check('清理完成', !run('lessonsByMonth["2027-01"]'));
 })();
+
+// 47) 更新鏈：導師等級／費率／學生資料改了 → 本月（2026-09）起已生成的課跟著改、學費單重算；已發送的移回待發送；以前的月份不動。
+//     用一位專屬導師與學生（Instructor T／S077）隔離在 2027-03（本月起）與 2026-08（以前），測完清掉
+console.log('[47] 導師等級／費率改了 → 課與學費單跟著改');
+{
+    run('tutorsList.push({ name: "Instructor T", tier: "普通導師" }); persistTutors(); afterTutorsChanged()');
+    run('studentDatabase.push({ id: "S077", name: "Student 077", phone: "00000000", email: "", type: "一對一", program: "Pop Guitar", level: "Intermediate 中級", duration: 45, tutor: "Instructor T", weekday: 1, time: "09:00", effectiveMonth: "", futureWeekday: null, futureTime: "" }); saveToLocalStorage(); renderBatchCheckboxes()');
+    const idx77 = run('studentDatabase.length - 1');
+    sandbox.__qsaHook = sel => (sel === '.batch-student-chk:checked' ? [{ value: String(idx77) }] : []);
+    getEl('batchMonth').value = '2027-03';
+    run('generateMasterSchedule()');
+    getEl('batchMonth').value = '2026-08';
+    run('generateMasterSchedule()');
+    sandbox.__qsaHook = () => [];
+    const key = 'TUITION:S077:2027-03';
+    const amt0 = run(`sendLog[${JSON.stringify(key)}].amount`);
+    run(`sendMarkSent(${JSON.stringify(key)}, "wa_link")`);
+    check('前置：2027-03 與 2026-08 各 5 堂（普通導師、$360）、2027-03 學費單已發', run('lessonsByMonth["2027-03"].filter(l => l.studentId === "S077").length') === 5
+        && run('lessonsByMonth["2027-03"].filter(l => l.studentId === "S077").every(l => l.tutorLevel === "普通導師")') && amt0 === 1800 && run(`sendLog[${JSON.stringify(key)}].status`) === 'SENT');
+    run("updateTutorTier('Instructor T', '資深導師')");
+    check('改導師等級 → 本月起的課改按資深計價；以前的月份（2026-08）不動；學生記錄不帶級別', run('lessonsByMonth["2027-03"].filter(l => l.studentId === "S077").every(l => l.tutorLevel === "資深導師")')
+        && run('lessonsByMonth["2026-08"].filter(l => l.studentId === "S077").every(l => l.tutorLevel === "普通導師")') && run(`!("tutorLevel" in studentDatabase[${idx77}])`));
+    const amt1 = run(`sendLog[${JSON.stringify(key)}].amount`);
+    check('已發送的學費單金額變了 → 移回待發送、記下上次金額；toast 說明；卡上標示「請重新發送」', run(`sendLog[${JSON.stringify(key)}].status`) === 'TODO' && amt1 > amt0
+        && run(`sendLog[${JSON.stringify(key)}].resend.amount`) === amt0 && run('lastToast').includes('移回待發送') && run('lastToast').includes('5 堂課已更新')
+        && run(`tuitionChangeNote(sendLog[${JSON.stringify(key)}])`).includes('請重新發送'));
+    check('2026-08 的學費單不動', run('sendLog["TUITION:S077:2026-08"].amount') === 1800);
+    run("updateTutorTier('Instructor T', '普通導師')");
+    check('改回普通 → 金額回來、課的級別回來', run(`sendLog[${JSON.stringify(key)}].amount`) === amt0 && run('lessonsByMonth["2027-03"].filter(l => l.studentId === "S077").every(l => l.tutorLevel === "普通導師")'));
+    // 改價：本月起的學費單重算（別的學生同組合的學費單也會動，先記下狀態、測完還原）
+    const snap = run('JSON.stringify(Object.keys(sendLog).filter(k => k.startsWith("TUITION:")).map(k => [k, sendLog[k].status, sendLog[k].amount, sendLog[k].sentAt, sendLog[k].method]))');
+    const rowExpr = 'rateTable.find(r => r.tutor === "普通導師" && r.instrument === "Pop Guitar" && r.grade === "Intermediate 中級" && r.duration === 45 && /Individual/.test(r.classType))';
+    run(`(() => { const row = ${rowExpr}; handleRateTableEdit({ dataset: { key: GACRates.overrideKey(row) }, value: String(row.rate + 10) }); })()`);
+    check('改價 → 2027-03 學費單按新價（每堂 +10）；toast 說明；課不用動', run(`sendLog[${JSON.stringify(key)}].amount`) === amt0 + 50 && run('lastToast').includes('已改價') && run('lastToast').includes('學費單已重算'));
+    run(`(() => { const row = ${rowExpr}; resetRateRow(GACRates.overrideKey(row)); })()`);
+    check('還原預設價 → 金額回來', run(`sendLog[${JSON.stringify(key)}].amount`) === amt0);
+    run(`JSON.parse(${JSON.stringify(snap)}).forEach(([k, st, amt, at, m]) => { const e = sendLog[k]; if (!e) return; e.status = st; e.amount = amt; e.sentAt = at; e.method = m; delete e.resend; delete e.priceChanged; }); persistSendlog()`);
+    // 已收款的學費單：金額變了只標示不動
+    run(`GACSendlog.markSent(sendLog, ${JSON.stringify(key)}, "manual"); GACSendlog.setPayment(sendLog, ${JSON.stringify(key)}, { payMethod: "1" }, "2026-09-15")`);
+    run("updateTutorTier('Instructor T', '資深導師')");
+    check('已收款：狀態與金額不動，標 priceChanged、卡上標示「已收款」', run(`sendLog[${JSON.stringify(key)}].status`) === 'SENT' && run(`sendLog[${JSON.stringify(key)}].amount`) === amt0
+        && run(`sendLog[${JSON.stringify(key)}].priceChanged.amount`) === amt1 && run(`tuitionChangeNote(sendLog[${JSON.stringify(key)}])`).includes('已收款') && run('lastToast').includes('請到發送中心處理'));
+    // 學生表單改時長 → 本月起的課與學費單跟著改（不用「生成」）
+    run(`openStudentModal(${idx77})`);
+    getEl('modalDuration').value = '60';
+    sandbox.__qsaHook = () => [];
+    run('saveStudentFromModal()');
+    check('學生表單改時長 45→60：本月起的課時長改了、學費單重算（已收款的只標示）；2026-08 不動', run('lessonsByMonth["2027-03"].filter(l => l.studentId === "S077").every(l => l.duration === 60)')
+        && run('lessonsByMonth["2026-08"].filter(l => l.studentId === "S077").every(l => l.duration === 45)') && run(`sendLog[${JSON.stringify(key)}].priceChanged.amount`) > amt1 && run('lastToast').includes('5 堂課已更新'));
+    // 清理
+    run('tutorsList = tutorsList.filter(t => t.name !== "Instructor T"); persistTutors(); afterTutorsChanged(); studentDatabase.splice(studentDatabase.findIndex(s => s.id === "S077"), 1); saveToLocalStorage();'
+        + 'delete lessonsByMonth["2027-03"]; delete lessonsByMonth["2026-08"]; Object.keys(sendLog).forEach(k => { if (/S077/.test(k)) delete sendLog[k]; }); persistLessons()');
+    getEl('batchMonth').value = '2026-09';
+    run('rebuildMonthContext(); renderAll()');
+    check('清理完成', !run('lessonsByMonth["2027-03"]') && !run('lessonsByMonth["2026-08"]') && !run('studentDatabase.some(s => s.id === "S077")'));
+}
 
 // 41) 糧單下載（Excel）：隔離在 2027-02，測完清掉。PDF 要真的 canvas，這裡的 stub DOM 畫不了，改在真實瀏覽器驗
 function __paysheetTail() {
